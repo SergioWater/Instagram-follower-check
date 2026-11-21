@@ -1,0 +1,86 @@
+(async () => {
+  if (location.hostname !== "www.instagram.com") {
+    console.error("Open www.instagram.com and log in first.");
+    return;
+  }
+
+  const userId = document.cookie.match(/(?:^|;\s*)ds_user_id=(\d+)/)?.[1];
+  if (!userId) {
+    console.error("Could not find your account. Log in and refresh Instagram.");
+    return;
+  }
+
+  if (window.igFollowCheck?.running) {
+    console.warn("A scan is already running.");
+    return;
+  }
+
+  const scan = window.igFollowCheck = { running: true, stop: false };
+  const pause = () => new Promise(resolve => setTimeout(resolve, 2000));
+
+  async function loadList(kind) {
+    const users = new Map();
+    const seenCursors = new Set();
+    let cursor = "";
+
+    do {
+      if (scan.stop) throw new Error("Scan stopped.");
+
+      const url = new URL(`/api/v1/friendships/${userId}/${kind}/`, location.origin);
+      url.searchParams.set("count", "50");
+      if (cursor) url.searchParams.set("max_id", cursor);
+
+      const response = await fetch(url, {
+        credentials: "same-origin",
+        headers: { "X-IG-App-ID": "936619743392459" }
+      });
+
+      if (!response.ok) throw new Error(`Instagram returned HTTP ${response.status}.`);
+
+      const data = await response.json();
+      if (data.status !== "ok" || !Array.isArray(data.users)) {
+        throw new Error(`Instagram returned an unexpected ${kind} response.`);
+      }
+
+      for (const user of data.users) {
+        const id = user.pk ?? user.pk_id;
+        if (id == null || !user.username) throw new Error("Incomplete account data.");
+        users.set(String(id), user.username);
+      }
+
+      console.log(`${kind}: ${users.size} loaded`);
+      cursor = String(data.next_max_id ?? "");
+      if (!cursor && data.has_more) throw new Error(`Incomplete ${kind} list.`);
+      if (cursor) {
+        if (seenCursors.has(cursor)) throw new Error("Instagram repeated a page.");
+        seenCursors.add(cursor);
+        await pause();
+      }
+    } while (cursor);
+
+    return users;
+  }
+
+  try {
+    const followers = await loadList("followers");
+    await pause();
+    const following = await loadList("following");
+    if (scan.stop) throw new Error("Scan stopped.");
+
+    scan.results = [...following]
+      .filter(([id]) => !followers.has(id))
+      .map(([, username]) => ({
+        username,
+        profile: `https://www.instagram.com/${username}/`
+      }))
+      .sort((a, b) => a.username.localeCompare(b.username));
+
+    console.log(`Loaded ${followers.size} followers and ${following.size} following.`);
+    console.log(`${scan.results.length} accounts don't follow you back.`);
+    console.table(scan.results);
+  } catch (error) {
+    console.error("Scan incomplete.", error.message);
+  } finally {
+    scan.running = false;
+  }
+})();
